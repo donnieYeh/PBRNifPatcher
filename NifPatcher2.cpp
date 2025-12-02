@@ -19,10 +19,10 @@ enum class LogLevel { Info, Warning, Error };
 
 static std::ofstream g_log_file;
 
-void init_log_file(const std::string& path) {
-	g_log_file.open(path, std::ios::out | std::ios::app);
+void init_log_file(const std::filesystem::path& path) {
+	g_log_file.open(path.string(), std::ios::out | std::ios::app);
 	if (!g_log_file.is_open()) {
-		std::cerr << "[ERROR] Failed to open log file '" << path << "'; continuing with console-only logging." << std::endl;
+		std::cerr << "[ERROR] Failed to open log file '" << path.string() << "'; continuing with console-only logging." << std::endl;
 		return;
 	}
 	g_log_file << "---- New session ----" << std::endl;
