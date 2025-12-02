@@ -9,12 +9,24 @@
 #include <iostream>
 #include <string>
 #include <system_error>
+#include <vector>
 #include "json.hpp"
 using json = nlohmann::json;
 using namespace std;
 using namespace std::filesystem;
 
 enum class LogLevel { Info, Warning, Error };
+
+static std::ofstream g_log_file;
+
+void init_log_file(const std::string& path) {
+	g_log_file.open(path, std::ios::out | std::ios::app);
+	if (!g_log_file.is_open()) {
+		std::cerr << "[ERROR] Failed to open log file '" << path << "'; continuing with console-only logging." << std::endl;
+		return;
+	}
+	g_log_file << "---- New session ----" << std::endl;
+}
 
 void log_message(LogLevel level, const std::string& message) {
 	const char* prefix = "[INFO] ";
@@ -25,6 +37,9 @@ void log_message(LogLevel level, const std::string& message) {
 		prefix = "[ERROR] ";
 
 	out << prefix << message << std::endl;
+	if (g_log_file.is_open()) {
+		g_log_file << prefix << message << std::endl;
+	}
 }
 
 void log_info(const std::string& message) { log_message(LogLevel::Info, message); }
@@ -467,7 +482,14 @@ int main(int argc, char* argv[])
 {
 	try
 	{
-		log_info("Starting PBR NIF patcher.");
+		std::error_code logEc;
+		auto exePath = absolute(path(argv[0]), logEc);
+		if (logEc || exePath.empty())
+			exePath = current_path();
+		auto exeDir = exePath.has_filename() ? exePath.parent_path() : exePath;
+		auto logPath = exeDir / "pbr_patcher.log";
+		init_log_file(logPath);
+		log_info("Starting PBR NIF patcher. Log file: " + logPath.string());
 		vector<json> js;
 		if (!exists(".\\PBRNifPatcher")) {
 			log_error("Config directory PBRNifPatcher does not exist at '" + absolute(".\\PBRNifPatcher").string() + "'.");
@@ -535,38 +557,44 @@ int main(int argc, char* argv[])
 				continue;
 			if (!is_directory(i->path()) && i->path().extension().compare(".nif") == 0) {
 				processedFiles++;
-				log_info("Processing " + i->path().string());
-				NifFile nif;
-				const auto loadResult = nif.Load(i->path());
-				if (loadResult == 0) {
-					auto fn = i->path().string();
-					if (set_pbr_textures(nif, js, fn)) {
-						log_info("Modified " + i->path().string());
-						path out_path;
-						out_path = path(out_dir) / path(i->path().lexically_normal());
-						std::error_code ec;
-						create_directories(out_path.parent_path(), ec);
-						if (ec) {
-							log_error("Failed to create directory '" + out_path.parent_path().string() + "': " + ec.message());
-							failedFiles++;
-							continue;
+				try {
+					log_info("Processing " + i->path().string());
+					NifFile nif;
+					const auto loadResult = nif.Load(i->path());
+					if (loadResult == 0) {
+						auto fn = i->path().string();
+						if (set_pbr_textures(nif, js, fn)) {
+							log_info("Modified " + i->path().string());
+							path out_path;
+							out_path = path(out_dir) / path(i->path().lexically_normal());
+							std::error_code ec;
+							create_directories(out_path.parent_path(), ec);
+							if (ec) {
+								log_error("Failed to create directory '" + out_path.parent_path().string() + "': " + ec.message());
+								failedFiles++;
+								continue;
+							}
+							const auto saveResult = nif.Save(out_path, save_options);
+							if (saveResult != 0) {
+								log_error("Error saving " + out_path.string() + " (code " + std::to_string(saveResult) + ": " + describe_save_error(saveResult) + ").");
+								failedFiles++;
+							} else {
+								log_info("Saved patched file to " + out_path.string());
+								modifiedFiles++;
+							}
 						}
-						const auto saveResult = nif.Save(out_path, save_options);
-						if (saveResult != 0) {
-							log_error("Error saving " + out_path.string() + " (code " + std::to_string(saveResult) + ": " + describe_save_error(saveResult) + ").");
-							failedFiles++;
-						} else {
-							log_info("Saved patched file to " + out_path.string());
-							modifiedFiles++;
+						else {
+							log_info("No changes applied to " + i->path().string());
 						}
 					}
-					else {
-						log_info("No changes applied to " + i->path().string());
+					else
+					{
+						log_error("Error opening " + i->path().string() + " (code " + std::to_string(loadResult) + ": " + describe_load_error(loadResult) + ").");
+						failedFiles++;
 					}
 				}
-				else
-				{
-					log_error("Error opening " + i->path().string() + " (code " + std::to_string(loadResult) + ": " + describe_load_error(loadResult) + ").");
+				catch (const std::exception& ex) {
+					log_error("Exception while processing " + i->path().string() + ": " + ex.what());
 					failedFiles++;
 				}
 			}
