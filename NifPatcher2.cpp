@@ -19,6 +19,21 @@ enum class LogLevel { Info, Warning, Error };
 
 static std::ofstream g_log_file;
 
+std::string safe_path_string(const std::filesystem::path& p) {
+	try {
+		auto u8 = p.u8string();
+		return std::string(u8.begin(), u8.end());
+	}
+	catch (...) {
+		try {
+			return p.generic_string();
+		}
+		catch (...) {
+			return std::string("<unprintable path>");
+		}
+	}
+}
+
 void init_log_file(const std::filesystem::path& path) {
 	g_log_file.open(path.string(), std::ios::out | std::ios::app);
 	if (!g_log_file.is_open()) {
@@ -489,34 +504,43 @@ int main(int argc, char* argv[])
 		auto exeDir = exePath.has_filename() ? exePath.parent_path() : exePath;
 		auto logPath = exeDir / "pbr_patcher.log";
 		init_log_file(logPath);
-		log_info("Starting PBR NIF patcher. Log file: " + logPath.string());
+		log_info("Starting PBR NIF patcher. Log file: " + safe_path_string(logPath));
 		vector<json> js;
-		if (!exists(".\\PBRNifPatcher")) {
-			log_error("Config directory PBRNifPatcher does not exist at '" + absolute(".\\PBRNifPatcher").string() + "'.");
+		std::error_code absEc;
+		auto absCfgPath = absolute(".\\PBRNifPatcher", absEc);
+		if (!exists(absCfgPath)) {
+			log_error("Config directory PBRNifPatcher does not exist at '" + (absEc ? std::string(".\\PBRNifPatcher") : safe_path_string(absCfgPath)) + "'.");
 			getchar();
 			return 1;
 		}
-		if (!exists(".\\meshes")) {
-			log_error("Meshes directory '.\\\\meshes' not found at '" + absolute(".\\meshes").string() + "'.");
+		auto absMeshesPath = absolute(".\\meshes", absEc);
+		if (!exists(absMeshesPath)) {
+			log_error("Meshes directory '.\\\\meshes' not found at '" + (absEc ? std::string(".\\meshes") : safe_path_string(absMeshesPath)) + "'.");
 			getchar();
 			return 1;
 		}
 		size_t configCount = 0;
-		for (recursive_directory_iterator i(".\\PBRNifPatcher"), end; i != end; ++i) {
+		std::error_code cfgIterEc;
+		for (recursive_directory_iterator i(".\\PBRNifPatcher", directory_options::skip_permission_denied, cfgIterEc), end; i != end; i.increment(cfgIterEc)) {
+			if (cfgIterEc) {
+				log_error("Directory iteration error under PBRNifPatcher: " + cfgIterEc.message());
+				cfgIterEc.clear();
+				continue;
+			}
 			if (!is_directory(i->path()) && i->path().extension().compare(".json") == 0) {
 				configCount++;
 				std::ifstream f(i->path());
 				if (!f.is_open()) {
-					log_error("Failed to open config file '" + i->path().string() + "'.");
+					log_error("Failed to open config file '" + safe_path_string(i->path()) + "'.");
 					continue;
 				}
 				try {
 					js.push_back(json::parse(f));
-					log_info("Config " + i->path().filename().string() + " loaded.");
+					log_info("Config " + safe_path_string(i->path().filename()) + " loaded.");
 				}
 				catch (json::parse_error& ex)
 				{
-					log_error("Json file '" + i->path().filename().string() + "' parse error at byte " + std::to_string(ex.byte) + ": " + ex.what());
+					log_error("Json file '" + safe_path_string(i->path().filename()) + "' parse error at byte " + std::to_string(ex.byte) + ": " + ex.what());
 					log_error("Error in configuration, quitting.");
 					getchar();
 					return 1;
@@ -551,50 +575,57 @@ int main(int argc, char* argv[])
 		size_t processedFiles = 0;
 		size_t modifiedFiles = 0;
 		size_t failedFiles = 0;
-		log_info("Scanning meshes under '" + absolute(".\\meshes").string() + "'.");
-		for (recursive_directory_iterator i(".\\meshes"), end; i != end; ++i) {
-			if (i->path().string().starts_with(out_dir))
+		log_info("Scanning meshes under '" + (absEc ? std::string(".\\meshes") : safe_path_string(absMeshesPath)) + "'.");
+		std::error_code meshIterEc;
+		for (recursive_directory_iterator i(".\\meshes", directory_options::skip_permission_denied, meshIterEc), end; i != end; i.increment(meshIterEc)) {
+			if (meshIterEc) {
+				log_error("Directory iteration error under meshes: " + meshIterEc.message());
+				meshIterEc.clear();
+				continue;
+			}
+			auto currentPathStr = safe_path_string(i->path());
+			if (currentPathStr.rfind(out_dir, 0) == 0)
 				continue;
 			if (!is_directory(i->path()) && i->path().extension().compare(".nif") == 0) {
 				processedFiles++;
 				try {
-					log_info("Processing " + i->path().string());
+					log_info("Processing " + currentPathStr);
 					NifFile nif;
 					const auto loadResult = nif.Load(i->path());
 					if (loadResult == 0) {
-						auto fn = i->path().string();
+						auto fn = currentPathStr;
 						if (set_pbr_textures(nif, js, fn)) {
-							log_info("Modified " + i->path().string());
+							log_info("Modified " + currentPathStr);
 							path out_path;
 							out_path = path(out_dir) / path(i->path().lexically_normal());
 							std::error_code ec;
 							create_directories(out_path.parent_path(), ec);
 							if (ec) {
-								log_error("Failed to create directory '" + out_path.parent_path().string() + "': " + ec.message());
+								log_error("Failed to create directory '" + safe_path_string(out_path.parent_path()) + "': " + ec.message());
 								failedFiles++;
 								continue;
 							}
 							const auto saveResult = nif.Save(out_path, save_options);
 							if (saveResult != 0) {
-								log_error("Error saving " + out_path.string() + " (code " + std::to_string(saveResult) + ": " + describe_save_error(saveResult) + ").");
+								log_error("Error saving " + safe_path_string(out_path) + " (code " + std::to_string(saveResult) + ": " + describe_save_error(saveResult) + ").");
 								failedFiles++;
 							} else {
-								log_info("Saved patched file to " + out_path.string());
+								log_info("Saved patched file to " + safe_path_string(out_path));
 								modifiedFiles++;
 							}
 						}
 						else {
-							log_info("No changes applied to " + i->path().string());
+							log_info("No changes applied to " + currentPathStr);
 						}
 					}
 					else
 					{
-						log_error("Error opening " + i->path().string() + " (code " + std::to_string(loadResult) + ": " + describe_load_error(loadResult) + ").");
+						log_error("Error opening " + currentPathStr + " (code " + std::to_string(loadResult) + ": " + describe_load_error(loadResult) + ").");
 						failedFiles++;
 					}
 				}
 				catch (const std::exception& ex) {
-					log_error("Exception while processing " + i->path().string() + ": " + ex.what());
+					log_error("Exception while processing " + currentPathStr + ": " + ex.what());
 					failedFiles++;
 				}
 			}
