@@ -25,3 +25,4 @@ jobs:
           path: |
             x64/Release/NifPatcher2.exe
             x64/Release/*.pdb
+            tools/xedit/pbr_patcher.pas

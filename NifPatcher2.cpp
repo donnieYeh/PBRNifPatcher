@@ -10,6 +10,7 @@
 #include <string>
 #include <system_error>
 #include <vector>
+#include <unordered_map>
 #include "json.hpp"
 using json = nlohmann::json;
 using namespace std;
@@ -127,7 +128,12 @@ bool flag(nlohmann::json_abi_v3_11_3::json& json, const char* key) {
 	return json.contains(key) && json[key];
 }
 
-bool set_pbr_textures(NifFile& nif, vector<json> js, string& filename) {
+struct ShapeTextureEntry {
+	string shapeName;
+	vector<string> slots;
+};
+
+bool set_pbr_textures(NifFile& nif, vector<json> js, string& filename, vector<ShapeTextureEntry>& shapeTextures) {
 	auto modified = false;
 	for (const auto shape : nif.GetShapes())
 	{
@@ -489,6 +495,15 @@ bool set_pbr_textures(NifFile& nif, vector<json> js, string& filename) {
 		if (shapeModified) {
 			log_info("Shape '" + shapeName + "' updated while processing '" + filename + "'.");
 		}
+		if (shape && shapeModified) {
+			auto refs = nif.GetTexturePathRefs(shape);
+			vector<string> slots(8, "");
+			const auto count = min<size_t>(refs.size(), slots.size());
+			for (size_t idx = 0; idx < count; ++idx) {
+				slots[idx] = refs[idx].get();
+			}
+			shapeTextures.push_back({ shapeName, slots });
+		}
 	}
 	return modified;
 }
@@ -575,6 +590,7 @@ int main(int argc, char* argv[])
 		size_t processedFiles = 0;
 		size_t modifiedFiles = 0;
 		size_t failedFiles = 0;
+		std::unordered_map<std::string, std::vector<ShapeTextureEntry>> textureMapping;
 		log_info("Scanning meshes under '" + (absEc ? std::string(".\\meshes") : safe_path_string(absMeshesPath)) + "'.");
 		std::error_code meshIterEc;
 		for (recursive_directory_iterator i(".\\meshes", directory_options::skip_permission_denied, meshIterEc), end; i != end; i.increment(meshIterEc)) {
@@ -594,7 +610,8 @@ int main(int argc, char* argv[])
 					const auto loadResult = nif.Load(i->path());
 					if (loadResult == 0) {
 						auto fn = currentPathStr;
-						if (set_pbr_textures(nif, js, fn)) {
+						vector<ShapeTextureEntry> shapeTextures;
+						if (set_pbr_textures(nif, js, fn, shapeTextures)) {
 							log_info("Modified " + currentPathStr);
 							path out_path;
 							out_path = path(out_dir) / path(i->path().lexically_normal());
@@ -612,6 +629,11 @@ int main(int argc, char* argv[])
 							} else {
 								log_info("Saved patched file to " + safe_path_string(out_path));
 								modifiedFiles++;
+								std::error_code relEc;
+								auto rel = relative(i->path(), absMeshesPath, relEc);
+								auto relStr = relEc ? currentPathStr : safe_path_string(rel);
+								std::replace(relStr.begin(), relStr.end(), '/', '\\');
+								textureMapping[relStr] = shapeTextures;
 							}
 						}
 						else {
@@ -631,6 +653,28 @@ int main(int argc, char* argv[])
 			}
 		}
 		log_info("Processing complete. Files scanned: " + std::to_string(processedFiles) + ", modified: " + std::to_string(modifiedFiles) + ", failures: " + std::to_string(failedFiles) + ".");
+		if (!textureMapping.empty()) {
+			auto mapPath = path(out_dir) / "pbr_map.tsv";
+			std::ofstream mapFile(mapPath);
+			if (!mapFile.is_open()) {
+				log_error("Failed to write mapping file at " + safe_path_string(mapPath));
+			}
+			else {
+				mapFile << "mesh\tshape\tslot0\tslot1\tslot2\tslot3\tslot4\tslot5\tslot6\tslot7\n";
+				for (const auto& kv : textureMapping) {
+					for (const auto& entry : kv.second) {
+						mapFile << kv.first << '\t' << entry.shapeName;
+						for (size_t idx = 0; idx < 8; ++idx) {
+							mapFile << '\t';
+							if (idx < entry.slots.size())
+								mapFile << entry.slots[idx];
+						}
+						mapFile << '\n';
+					}
+				}
+				log_info("Mapping file written to " + safe_path_string(mapPath));
+			}
+		}
 	}
 	catch (const std::exception& exc)
 	{
